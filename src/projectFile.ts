@@ -1,5 +1,6 @@
 import type { Layer } from './model.ts';
 import type { Project, MusicAsset } from './project.ts';
+import { lyricLines } from './autoMv.ts';
 
 export const resolutions = [720, 1080, 1440, 2160] as const;
 export type Settings = { name: string; resolution: typeof resolutions[number]; fps: 30 | 60;
@@ -49,6 +50,25 @@ export function validateProject(input: unknown): Project {
       (layer.textTrackId !== undefined && !text(layer.textTrackId))) invalid();
   }
   const project = input as Project;
+  if (input.autoMv !== undefined) {
+    const mv = input.autoMv;
+    if (!object(mv) || !text(mv.lyrics) || !Array.isArray(mv.starts) ||
+        mv.starts.length > lyricLines(mv.lyrics).length ||
+        !mv.starts.every((time, i, times) => finite(time) && time >= 0 && (i === 0 || time > times[i - 1])) ||
+        (mv.end !== null && (!positive(mv.end) || Number(mv.end) <= (mv.starts.at(-1) ?? -1))) ||
+        !Array.isArray(mv.versions)) invalid();
+    const ids = new Set<string>();
+    for (const version of mv.versions) {
+      if (!object(version) || !text(version.id) || !version.id || ids.has(version.id) ||
+          !text(version.name) || !text(version.background) || !color.test(version.background) ||
+          !finite(version.style) || !Number.isInteger(version.style) || version.style < -1 || version.style > 3 ||
+          !Array.isArray(version.layers) || !version.layers.every(layer => object(layer) &&
+            ['text', 'rectangle', 'ellipse'].includes(String(layer.kind)) && validLayer(layer) &&
+            (layer.textTrackId === undefined || text(layer.textTrackId)))) invalid();
+      ids.add(version.id);
+    }
+    if (mv.active !== null && (!text(mv.active) || !ids.has(mv.active))) invalid();
+  }
   if (project.musicClips !== undefined && !Array.isArray(project.musicClips)) invalid();
   const music = project.musicClips ?? (project.music == null ? [] : [project.music]);
   for (const clip of music) {

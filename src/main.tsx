@@ -2,7 +2,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, FormEvent, PointerEvent } from 'react';
 import { createRoot } from 'react-dom/client';
 import { defaults, evaluate } from './animation';
-import { exampleLayers } from './example';
+import { AutoWorkspace } from './AutoWorkspace';
+import { editStart, emptyAutoMv, generateMv, lyricLines, recordStart } from './autoMv';
+import type { Version } from './autoMv';
 import { previewGeometry } from './geometry';
 import type { Corner, Geometry } from './geometry';
 import type { Pose } from './animation';
@@ -85,12 +87,15 @@ function App() {
   const [fontProvider] = useState(createBrowserFontProvider);
   const [fonts, setFonts] = useState<FontOption[]>([]);
   type EditData = { layers: Layer[]; musicClips: MusicClip[]; asset?: MusicAsset };
-  const [history] = useState(() => createHistory<EditData>({ layers: exampleLayers(), musicClips: [] },
+  const [history] = useState(() => createHistory<EditData>({ layers: [], musicClips: [] },
     (a, b) => a.asset === b.asset && equalProjectItems(a.layers, b.layers) && equalProjectItems(a.musicClips, b.musicClips)));
   const [{ layers, musicClips, asset }, setEditData] = useState(history.current);
   const [settings, setSettings] = useState(defaultSettings);
-  const saved = useRef({ data: history.current, settings: defaultSettings });
-  const dirty = saved.current.data !== history.current || saved.current.settings !== settings;
+  const [detailed, setDetailed] = useState(false);
+  const [autoMv, setAutoMv] = useState(emptyAutoMv);
+  const [syncError, setSyncError] = useState('');
+  const saved = useRef({ data: history.current, settings: defaultSettings, autoMv: emptyAutoMv });
+  const dirty = saved.current.data !== history.current || saved.current.settings !== settings || saved.current.autoMv !== autoMv;
   const [projectMenu, setProjectMenu] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
   const [loadingProject, setLoadingProject] = useState(false);
@@ -102,9 +107,9 @@ function App() {
     setEditData(history.update(data => ({ ...data, musicClips: typeof update === 'function' ? update(data.musicClips) : update })));
   }
   function finishEdit(cancel = false) { setEditData(history.finish(cancel)); }
-  const [selection, setPrimarySelection] = useState<Selection | null>(() => ({ layerId: layers[0].id }));
-  const [expanded, setExpanded] = useState(() => new Set([layers[0].id]));
-  const [playhead] = useState(() => createPlayhead(2.4));
+  const [selection, setPrimarySelection] = useState<Selection | null>(null);
+  const [expanded, setExpanded] = useState(() => new Set<string>());
+  const [playhead] = useState(() => createPlayhead(0));
   const [selectedMusicId, setSelectedMusicId] = useState<string>();
   const music = musicClips.find(clip => clip.id === selectedMusicId);
   const musicSelected = music !== undefined;
@@ -123,6 +128,10 @@ function App() {
   const picker = useRef<HTMLInputElement>(null);
   const relinking = useRef(false);
   const duration = Math.max(DURATION, ...musicClips.map(clip => clip.end), ...layers.map(item => item.end));
+  const musicEnd = Math.max(0, ...musicClips.map(clip => clip.end));
+  const contentEnd = Math.max(musicEnd, ...layers.map(item => item.end));
+  const playbackEnd = detailed && !autoMv.active ? duration : contentEnd;
+  const activeAudio = useRef<MusicClip | undefined>(undefined);
   const [playing, setPlaying] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
   const [timelineHeight, setTimelineHeight] = useState(savedTimelineHeight);
@@ -252,7 +261,10 @@ function App() {
     const nextSettings = project.settings ?? defaultSettings;
     pause();
     history.reset({ ...restored, asset: restoredAsset });
-    saved.current = { data: history.current, settings: nextSettings };
+    const nextAuto = project.autoMv ?? emptyAutoMv;
+    saved.current = { data: history.current, settings: nextSettings, autoMv: nextAuto };
+    setAutoMv(nextAuto);
+    setSyncError('');
     setEditData(history.current);
     setSettings(nextSettings);
     const first = restored.layers[0];
@@ -277,7 +289,7 @@ function App() {
 
   function projectData(data: EditData): Project {
     return { version: 1, settings, layers: packLayers(data.layers), music: data.musicClips[0] ?? null,
-      musicClips: data.musicClips, animationTime: 'relative' };
+      musicClips: data.musicClips, animationTime: 'relative', autoMv };
   }
 
   function persistProject(data: EditData) {
@@ -293,7 +305,7 @@ function App() {
     const write = saveQueue.current.then(() => saveProject(project, data.asset));
     saveQueue.current = write.catch(() => {});
     await write;
-    saved.current = { data, settings };
+    saved.current = { data, settings, autoMv };
     window.location.reload();
   }
 
@@ -302,7 +314,7 @@ function App() {
     try {
       if (packaged && data.musicClips.length && !data.asset) throw new Error('素材込み保存の前に音楽を再リンクしてください。');
       downloadFile(makeProjectFile(projectData(data), packaged ? data.asset : undefined), settings.name, '.mveasy');
-      saved.current = { data, settings };
+      saved.current = { data, settings, autoMv };
       setProjectMenu(false);
       setStorageError('');
     } catch (error) {
@@ -349,7 +361,7 @@ function App() {
     if (!ready) return;
     const timer = setTimeout(() => persistProject(history.current), 350);
     return () => clearTimeout(timer);
-  }, [ready, layers, musicClips, asset, settings]);
+  }, [ready, layers, musicClips, asset, settings, autoMv]);
 
   useEffect(() => {
     if (!ready) return;
@@ -405,6 +417,11 @@ function App() {
       }) : [imported];
       setEditData(history.update(data => ({ ...data, musicClips: clips, asset: { file, peaks: decoded.peaks } })));
       setSelectedMusicId(id);
+      if (!relinking.current) {
+        setAutoMv(current => ({ ...current, starts: [], end: null }));
+        setSyncError('');
+        seek(0);
+      }
       const limit = Math.max(DURATION, ...clips.map(clip => clip.end), ...layers.map(item => item.end));
       if (clock.current > limit) seek(limit);
     } catch {
@@ -417,6 +434,7 @@ function App() {
   function pause() {
     if (frame.current !== null) cancelAnimationFrame(frame.current);
     frame.current = null;
+    activeAudio.current = undefined;
     media.current?.pause();
     setPlaying(false);
   }
@@ -427,7 +445,7 @@ function App() {
 
   function togglePlayback() {
     if (frame.current !== null) {
-      const active = musicAt(clock.current);
+      const active = activeAudio.current;
       if (active && asset && !media.current!.paused) {
         const position = clamp(active.start + media.current!.currentTime - active.inPoint, active.start, active.end);
         clock.current = position;
@@ -438,7 +456,7 @@ function App() {
     }
     if (!ready || loadingMusic || timelineEditing.current) return;
     finishPreviewDrag();
-    if (clock.current >= duration) {
+    if (!playbackEnd || clock.current >= playbackEnd) {
       clock.current = 0;
       playhead.update(0);
     }
@@ -450,6 +468,7 @@ function App() {
     let active: MusicClip | undefined;
     function startAudio(clip: MusicClip, position: number) {
       active = clip;
+      activeAudio.current = clip;
       audio.currentTime = sourceTime(clip, position);
       audio.volume = clip.volume;
       audio.muted = clip.muted;
@@ -461,13 +480,14 @@ function App() {
       });
     }
     function update(now: number) {
-      let position = Math.min(duration, offset + Math.max(0, now - began) / 1000);
+      let position = Math.min(playbackEnd, offset + Math.max(0, now - began) / 1000);
       const clip = active;
       if (clip) {
         position = audio.ended ? clip.end : clamp(clip.start + audio.currentTime - clip.inPoint, clip.start, clip.end);
         if (position >= clip.end - 0.00001) {
           position = clip.end;
           active = undefined;
+          activeAudio.current = undefined;
           cursor++;
           began = now;
           offset = position;
@@ -475,6 +495,7 @@ function App() {
           if (next && next.start <= position) {
             if (!audio.ended && Math.abs(sourceTime(next, position) - audio.currentTime) < 0.045) {
               active = next;
+              activeAudio.current = next;
               audio.volume = next.volume;
               audio.muted = next.muted;
             } else startAudio(next, position);
@@ -486,7 +507,7 @@ function App() {
       }
       clock.current = position;
       playhead.update(position);
-      if (position < duration) frame.current = requestAnimationFrame(update);
+      if (position < playbackEnd) frame.current = requestAnimationFrame(update);
       else pause();
     }
     setAddOpen(false);
@@ -504,11 +525,20 @@ function App() {
       if (event.ctrlKey && !event.altKey && !event.metaKey && !event.shiftKey &&
           !event.isComposing && event.keyCode !== 229 && event.key.toLowerCase() === 's') {
         event.preventDefault();
-        if (ready && !loadingMusic && !timelineEditing.current && !previewDrag.current && !event.repeat) saveFile();
+        if (ready && !loadingMusic && !timelineEditing.current && !previewDrag.current && !event.repeat) saveFile(!detailed && !!asset);
+        return;
+      }
+      if (event.defaultPrevented || event.isComposing || event.keyCode === 229) return;
+      if (!detailed) {
+        if (isEditing(event.target) && !(event.target instanceof HTMLInputElement && event.target.type === 'range')) return;
+        if (event.code === 'Space' && playing && autoMv.starts.length < lyricLines(autoMv.lyrics).length &&
+            !event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey) {
+          event.preventDefault();
+          if (!event.repeat) markLyric();
+        }
         return;
       }
       if (isEditing(event.target)) return;
-      if (event.defaultPrevented || event.isComposing || event.keyCode === 229) return;
       if (timelineEditing.current) return;
       const key = event.key.toLowerCase();
       if (event.ctrlKey && !event.altKey && !event.metaKey && !event.shiftKey) {
@@ -597,7 +627,7 @@ function App() {
 
   useEffect(() => {
     function onJump(event: KeyboardEvent) {
-      if (exportOpen || loadingProject) return;
+      if (!detailed || exportOpen || loadingProject) return;
       if (event.defaultPrevented || !event.altKey || event.shiftKey || event.ctrlKey || event.metaKey ||
           event.isComposing || event.keyCode === 229 || !['ArrowLeft', 'ArrowRight'].includes(event.key)) return;
       if (timelineEditing.current) return;
@@ -609,7 +639,7 @@ function App() {
     }
     window.addEventListener('keydown', onJump);
     return () => window.removeEventListener('keydown', onJump);
-  }, [layers, musicClips, asset, exportOpen, loadingProject]);
+  }, [layers, musicClips, asset, exportOpen, loadingProject, detailed]);
 
   useEffect(() => {
     if (!addOpen) return;
@@ -832,11 +862,75 @@ function App() {
     }
   }
 
-  return <main className="editor" ref={editor} style={{
+  function markLyric() {
+    const clip = activeAudio.current;
+    const audio = media.current;
+    if (!audio || !clip || audio.paused || audio.ended || audio.seeking) return;
+    const time = clip.start + audio.currentTime - clip.inPoint;
+    if (autoMv.starts.length >= lyricLines(autoMv.lyrics).length) return;
+    const starts = recordStart(autoMv.starts, time, Math.min(clip.end, autoMv.end ?? musicEnd));
+    if (starts === autoMv.starts) {
+      setSyncError('前の記録より後の時刻で記録してください。');
+      return;
+    }
+    setAutoMv({ ...autoMv, starts });
+    setSyncError('');
+  }
+
+  function changeLyrics(lyrics: string) {
+    const previous = lyricLines(autoMv.lyrics);
+    const next = lyricLines(lyrics);
+    const changed = previous.findIndex((line, index) => line !== next[index]);
+    const starts = autoMv.starts.slice(0, changed < 0 ? next.length : changed);
+    setAutoMv({ ...autoMv, lyrics, starts, end: starts.length === autoMv.starts.length ? autoMv.end : null });
+    setSyncError('');
+  }
+
+  function switchVersion(id?: string) {
+    const current = autoMv.versions.find(version => version.id === autoMv.active);
+    let versions = autoMv.versions.map(version => version.id === current?.id
+      ? { ...version, layers, background: settings.background } : version);
+    if (!current && layers.length) {
+      versions = [{ id: crypto.randomUUID(), name: '元の編集データ', layers, style: -1, background: settings.background }, ...versions];
+    }
+    let chosen: Version | undefined;
+    if (id) chosen = versions.find(version => version.id === id);
+    else {
+      const lines = lyricLines(autoMv.lyrics);
+      const end = autoMv.end ?? musicEnd;
+      if (!asset || !lines.length || lines.length !== autoMv.starts.length ||
+          end > musicEnd || end <= autoMv.starts[lines.length - 1]) return;
+      const number = versions.filter(version => version.style >= 0).length + 1;
+      const generated = generateMv(lines, autoMv.starts, end, musicEnd, current?.style ?? -1, number);
+      chosen = { ...generated, id: crypto.randomUUID(), name: `生成結果 ${number}`, background: defaultSettings.background };
+      versions = [...versions, chosen];
+    }
+    if (!chosen) return;
+    const restored = uniqueProjectIds(chosen.layers, []).layers;
+    seek(0);
+    history.reset({ ...history.current, layers: restored });
+    setEditData(history.current);
+    setSettings({ ...settings, background: chosen.background });
+    setAutoMv({ ...autoMv, versions, active: chosen.id });
+    setSelection(restored[0] ? { layerId: restored[0].id } : null);
+    setSelectedMusicId(undefined);
+    setExpanded(new Set(restored[0] ? [trackId(restored[0])] : []));
+    setSyncError('');
+  }
+
+  function changeMode(next: boolean) {
+    finishPreviewDrag();
+    pause();
+    setDetailed(next);
+    setAddOpen(false);
+    setProjectMenu(false);
+  }
+
+  return <main className={detailed ? 'editor' : undefined} ref={editor} style={{
     '--timeline-height': timelineHeight === null ? undefined : `${timelineHeight}px`,
   } as CSSProperties}>
     {exportOpen && <ExportDialog settings={settings} onSettings={setSettings} onClose={() => setExportOpen(false)} onReload={saveAndReload}
-      snapshot={{ layers, clips: musicClips, asset, duration, fontProvider }} />}
+      snapshot={{ layers, clips: musicClips, asset, duration: autoMv.active ? contentEnd || duration : duration, fontProvider }} />}
     <input ref={projectPicker} type="file" hidden accept=".mveasy,.json"
       onChange={event => {
         const file = event.currentTarget.files?.[0];
@@ -853,12 +947,48 @@ function App() {
         event.currentTarget.value = '';
         if (file && frame.current === null) void importMusic(file);
       }} />
+    {!detailed ? <AutoWorkspace mv={autoMv} ready={ready} busy={loadingProject || loadingMusic}
+      musicName={musicClips[0]?.asset.name} hasAudio={!!asset && musicEnd > 0} musicEnd={musicEnd}
+      playbackEnd={contentEnd} playing={playing} playhead={playhead}
+      error={syncError || audioError || storageError}
+      preview={layers.length > 0 ? <div className="canvas auto-canvas" style={{ background: settings.background }}>
+        <PreviewScene playhead={playhead} groups={sceneGroups} fontProvider={fontProvider} />
+      </div> : undefined}
+      importMusic={() => {
+        const missing = !asset && musicClips[0];
+        relinking.current = !!missing;
+        if (missing) setSelectedMusicId(missing.id);
+        picker.current?.click();
+      }}
+      open={() => { pause(); projectPicker.current?.click(); }}
+      save={() => saveFile(!!asset)} edit={() => changeMode(true)}
+      play={togglePlayback} seek={seek} mark={markLyric}
+      undo={() => {
+        const undone = autoMv.starts.at(-1);
+        if (undone !== undefined) seek(undone);
+        setAutoMv({ ...autoMv, starts: autoMv.starts.slice(0, -1) });
+        setSyncError('');
+      }}
+      setLyrics={changeLyrics}
+      setStart={(index, time) => {
+        const starts = editStart(autoMv.starts, index, time, Math.min(musicEnd, autoMv.end ?? musicEnd));
+        if (starts === autoMv.starts) setSyncError('前後の歌詞の間に開始時刻を設定してください。');
+        else { setAutoMv({ ...autoMv, starts }); setSyncError(''); }
+      }}
+      setEnd={time => {
+        if (time > (autoMv.starts.at(-1) ?? 0) && time <= musicEnd) {
+          setAutoMv({ ...autoMv, end: time }); setSyncError('');
+        } else setSyncError('最後の歌詞の開始後から曲の終わりまでの時刻を指定してください。');
+      }}
+      generate={() => switchVersion()} restore={switchVersion}
+      exportVideo={() => { pause(); setExportOpen(true); }} /> : <>
     <header className="app-header" inert={loadingProject}>
       <div className="brand"><span className="brand-icon"><Icon name="logo" size={22} /></span><h1>MV <em>Easy</em></h1></div>
       <span className="header-divider" />
       <input className="project-name" aria-label="プロジェクト名" value={settings.name} maxLength={120}
         onChange={event => setSettings({ ...settings, name: event.target.value })} />
       <div className="project-actions">
+        <button type="button" onClick={() => changeMode(false)}>自動生成へ</button>
         <button type="button" onClick={() => saveFile()} disabled={!ready || loadingMusic}>保存</button>
         <button type="button" aria-label="保存の種類" aria-expanded={projectMenu} disabled={!ready || loadingMusic}
           onClick={() => setProjectMenu(!projectMenu)}>▾</button>
@@ -924,13 +1054,13 @@ function App() {
           </div>
         </div>
         <div className="transport">
-          <div className="timecode"><Icon name="clock" size={15} /><Timecode playhead={playhead} /><span>/ {formatTime(duration)}</span></div>
+          <div className="timecode"><Icon name="clock" size={15} /><Timecode playhead={playhead} /><span>/ {formatTime(playbackEnd)}</span></div>
           <div className="transport-buttons">
             <button type="button" className="icon-button" aria-label="最初へ" onClick={() => seek(0)}><Icon name="first" /></button>
             <button type="button" className="primary play-button" aria-label={playing ? '一時停止' : '再生'}
               onClick={togglePlayback}>
               <Icon name={playing ? 'pause' : 'play'} size={19} /></button>
-            <button type="button" className="icon-button" aria-label="最後へ" onClick={() => seek(duration)}><Icon name="last" /></button>
+            <button type="button" className="icon-button" aria-label="最後へ" onClick={() => seek(playbackEnd)}><Icon name="last" /></button>
           </div>
           <span className="aspect">16:9</span>
         </div>
@@ -1091,6 +1221,7 @@ function App() {
         else next.add(id);
         return next;
       })} /></div>
+    </>}
   </main>;
 }
 

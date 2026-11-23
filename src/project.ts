@@ -1,8 +1,9 @@
 import type { ProjectLayer } from './model.ts';
 import type { Settings } from './projectFile.ts';
 import type { MusicClip } from './music.ts';
+import type { AutoMv } from './autoMv.ts';
 
-export type Project = { version?: 1; settings?: Settings; layers: ProjectLayer[]; music: MusicClip | null; musicClips?: MusicClip[]; animationTime?: 'relative' };
+export type Project = { version?: 1; settings?: Settings; layers: ProjectLayer[]; music: MusicClip | null; musicClips?: MusicClip[]; animationTime?: 'relative'; autoMv?: AutoMv };
 export type MusicAsset = { file: Blob; peaks: Float32Array };
 
 function openProject(): Promise<IDBDatabase> {
