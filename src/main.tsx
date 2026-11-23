@@ -2,7 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, FormEvent, PointerEvent } from 'react';
 import { createRoot } from 'react-dom/client';
 import { defaults, evaluate } from './animation';
-import { AutoWorkspace } from './AutoWorkspace';
+import { AutoPanel } from './AutoPanel';
+import { exampleLayers } from './example';
 import { editStart, emptyAutoMv, generateMv, lyricLines, recordStart } from './autoMv';
 import type { Version } from './autoMv';
 import { previewGeometry } from './geometry';
@@ -87,11 +88,12 @@ function App() {
   const [fontProvider] = useState(createBrowserFontProvider);
   const [fonts, setFonts] = useState<FontOption[]>([]);
   type EditData = { layers: Layer[]; musicClips: MusicClip[]; asset?: MusicAsset };
-  const [history] = useState(() => createHistory<EditData>({ layers: [], musicClips: [] },
+  const [history] = useState(() => createHistory<EditData>({ layers: exampleLayers(), musicClips: [] },
     (a, b) => a.asset === b.asset && equalProjectItems(a.layers, b.layers) && equalProjectItems(a.musicClips, b.musicClips)));
   const [{ layers, musicClips, asset }, setEditData] = useState(history.current);
   const [settings, setSettings] = useState(defaultSettings);
-  const [detailed, setDetailed] = useState(false);
+  const [autoOpen, setAutoOpen] = useState(false);
+  const autoButton = useRef<HTMLButtonElement>(null);
   const [autoMv, setAutoMv] = useState(emptyAutoMv);
   const [syncError, setSyncError] = useState('');
   const saved = useRef({ data: history.current, settings: defaultSettings, autoMv: emptyAutoMv });
@@ -107,9 +109,9 @@ function App() {
     setEditData(history.update(data => ({ ...data, musicClips: typeof update === 'function' ? update(data.musicClips) : update })));
   }
   function finishEdit(cancel = false) { setEditData(history.finish(cancel)); }
-  const [selection, setPrimarySelection] = useState<Selection | null>(null);
-  const [expanded, setExpanded] = useState(() => new Set<string>());
-  const [playhead] = useState(() => createPlayhead(0));
+  const [selection, setPrimarySelection] = useState<Selection | null>(() => ({ layerId: layers[0].id }));
+  const [expanded, setExpanded] = useState(() => new Set([layers[0].id]));
+  const [playhead] = useState(() => createPlayhead(2.4));
   const [selectedMusicId, setSelectedMusicId] = useState<string>();
   const music = musicClips.find(clip => clip.id === selectedMusicId);
   const musicSelected = music !== undefined;
@@ -130,7 +132,8 @@ function App() {
   const duration = Math.max(DURATION, ...musicClips.map(clip => clip.end), ...layers.map(item => item.end));
   const musicEnd = Math.max(0, ...musicClips.map(clip => clip.end));
   const contentEnd = Math.max(musicEnd, ...layers.map(item => item.end));
-  const playbackEnd = detailed && !autoMv.active ? duration : contentEnd;
+  const generated = autoMv.versions.some(version => version.id === autoMv.active && version.style >= 0);
+  const playbackEnd = generated ? contentEnd || duration : duration;
   const activeAudio = useRef<MusicClip | undefined>(undefined);
   const [playing, setPlaying] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
@@ -264,6 +267,7 @@ function App() {
     const nextAuto = project.autoMv ?? emptyAutoMv;
     saved.current = { data: history.current, settings: nextSettings, autoMv: nextAuto };
     setAutoMv(nextAuto);
+    setAutoOpen(false);
     setSyncError('');
     setEditData(history.current);
     setSettings(nextSettings);
@@ -443,7 +447,7 @@ function App() {
     return musicClips.find(clip => position >= clip.start && position < clip.end);
   }
 
-  function togglePlayback() {
+  function togglePlayback(limit = playbackEnd) {
     if (frame.current !== null) {
       const active = activeAudio.current;
       if (active && asset && !media.current!.paused) {
@@ -456,7 +460,7 @@ function App() {
     }
     if (!ready || loadingMusic || timelineEditing.current) return;
     finishPreviewDrag();
-    if (!playbackEnd || clock.current >= playbackEnd) {
+    if (clock.current >= limit) {
       clock.current = 0;
       playhead.update(0);
     }
@@ -480,7 +484,7 @@ function App() {
       });
     }
     function update(now: number) {
-      let position = Math.min(playbackEnd, offset + Math.max(0, now - began) / 1000);
+      let position = Math.min(limit, offset + Math.max(0, now - began) / 1000);
       const clip = active;
       if (clip) {
         position = audio.ended ? clip.end : clamp(clip.start + audio.currentTime - clip.inPoint, clip.start, clip.end);
@@ -507,7 +511,7 @@ function App() {
       }
       clock.current = position;
       playhead.update(position);
-      if (position < playbackEnd) frame.current = requestAnimationFrame(update);
+      if (position < limit) frame.current = requestAnimationFrame(update);
       else pause();
     }
     setAddOpen(false);
@@ -525,20 +529,27 @@ function App() {
       if (event.ctrlKey && !event.altKey && !event.metaKey && !event.shiftKey &&
           !event.isComposing && event.keyCode !== 229 && event.key.toLowerCase() === 's') {
         event.preventDefault();
-        if (ready && !loadingMusic && !timelineEditing.current && !previewDrag.current && !event.repeat) saveFile(!detailed && !!asset);
+        if (ready && !loadingMusic && !timelineEditing.current && !previewDrag.current && !event.repeat) saveFile();
         return;
       }
       if (event.defaultPrevented || event.isComposing || event.keyCode === 229) return;
-      if (!detailed) {
-        if (isEditing(event.target) && !(event.target instanceof HTMLInputElement && event.target.type === 'range')) return;
-        if (event.code === 'Space' && playing && autoMv.starts.length < lyricLines(autoMv.lyrics).length &&
+      if (autoOpen) {
+        if (event.key === 'Escape') {
+          event.preventDefault();
+          closeAuto();
+          return;
+        }
+        if ((!isEditing(event.target) || (event.target instanceof HTMLInputElement && event.target.type === 'range')) &&
+            event.code === 'Space' && playing && autoMv.starts.length < lyricLines(autoMv.lyrics).length &&
             !event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey) {
           event.preventDefault();
           if (!event.repeat) markLyric();
+          return;
         }
-        return;
       }
       if (isEditing(event.target)) return;
+      if (event.target === autoButton.current ||
+          (event.target instanceof Element && event.target.closest('#auto-panel'))) return;
       if (timelineEditing.current) return;
       const key = event.key.toLowerCase();
       if (event.ctrlKey && !event.altKey && !event.metaKey && !event.shiftKey) {
@@ -627,7 +638,7 @@ function App() {
 
   useEffect(() => {
     function onJump(event: KeyboardEvent) {
-      if (!detailed || exportOpen || loadingProject) return;
+      if (exportOpen || loadingProject) return;
       if (event.defaultPrevented || !event.altKey || event.shiftKey || event.ctrlKey || event.metaKey ||
           event.isComposing || event.keyCode === 229 || !['ArrowLeft', 'ArrowRight'].includes(event.key)) return;
       if (timelineEditing.current) return;
@@ -639,7 +650,7 @@ function App() {
     }
     window.addEventListener('keydown', onJump);
     return () => window.removeEventListener('keydown', onJump);
-  }, [layers, musicClips, asset, exportOpen, loadingProject, detailed]);
+  }, [layers, musicClips, asset, exportOpen, loadingProject]);
 
   useEffect(() => {
     if (!addOpen) return;
@@ -887,6 +898,8 @@ function App() {
   }
 
   function switchVersion(id?: string) {
+    if (timelineEditing.current || id === autoMv.active) return;
+    finishPreviewDrag();
     const current = autoMv.versions.find(version => version.id === autoMv.active);
     let versions = autoMv.versions.map(version => version.id === current?.id
       ? { ...version, layers, background: settings.background } : version);
@@ -914,23 +927,21 @@ function App() {
     setAutoMv({ ...autoMv, versions, active: chosen.id });
     setSelection(restored[0] ? { layerId: restored[0].id } : null);
     setSelectedMusicId(undefined);
-    setExpanded(new Set(restored[0] ? [trackId(restored[0])] : []));
+    setExpanded(new Set(restored[0] ? [restored[0].id] : []));
     setSyncError('');
+    closeAuto();
   }
 
-  function changeMode(next: boolean) {
-    finishPreviewDrag();
-    pause();
-    setDetailed(next);
-    setAddOpen(false);
-    setProjectMenu(false);
+  function closeAuto() {
+    setAutoOpen(false);
+    autoButton.current?.focus();
   }
 
-  return <main className={detailed ? 'editor' : undefined} ref={editor} style={{
+  return <main className="editor" ref={editor} style={{
     '--timeline-height': timelineHeight === null ? undefined : `${timelineHeight}px`,
   } as CSSProperties}>
     {exportOpen && <ExportDialog settings={settings} onSettings={setSettings} onClose={() => setExportOpen(false)} onReload={saveAndReload}
-      snapshot={{ layers, clips: musicClips, asset, duration: autoMv.active ? contentEnd || duration : duration, fontProvider }} />}
+      snapshot={{ layers, clips: musicClips, asset, duration: playbackEnd, fontProvider }} />}
     <input ref={projectPicker} type="file" hidden accept=".mveasy,.json"
       onChange={event => {
         const file = event.currentTarget.files?.[0];
@@ -947,48 +958,19 @@ function App() {
         event.currentTarget.value = '';
         if (file && frame.current === null) void importMusic(file);
       }} />
-    {!detailed ? <AutoWorkspace mv={autoMv} ready={ready} busy={loadingProject || loadingMusic}
-      musicName={musicClips[0]?.asset.name} hasAudio={!!asset && musicEnd > 0} musicEnd={musicEnd}
-      playbackEnd={contentEnd} playing={playing} playhead={playhead}
-      error={syncError || audioError || storageError}
-      preview={layers.length > 0 ? <div className="canvas auto-canvas" style={{ background: settings.background }}>
-        <PreviewScene playhead={playhead} groups={sceneGroups} fontProvider={fontProvider} />
-      </div> : undefined}
-      importMusic={() => {
-        const missing = !asset && musicClips[0];
-        relinking.current = !!missing;
-        if (missing) setSelectedMusicId(missing.id);
-        picker.current?.click();
-      }}
-      open={() => { pause(); projectPicker.current?.click(); }}
-      save={() => saveFile(!!asset)} edit={() => changeMode(true)}
-      play={togglePlayback} seek={seek} mark={markLyric}
-      undo={() => {
-        const undone = autoMv.starts.at(-1);
-        if (undone !== undefined) seek(undone);
-        setAutoMv({ ...autoMv, starts: autoMv.starts.slice(0, -1) });
-        setSyncError('');
-      }}
-      setLyrics={changeLyrics}
-      setStart={(index, time) => {
-        const starts = editStart(autoMv.starts, index, time, Math.min(musicEnd, autoMv.end ?? musicEnd));
-        if (starts === autoMv.starts) setSyncError('前後の歌詞の間に開始時刻を設定してください。');
-        else { setAutoMv({ ...autoMv, starts }); setSyncError(''); }
-      }}
-      setEnd={time => {
-        if (time > (autoMv.starts.at(-1) ?? 0) && time <= musicEnd) {
-          setAutoMv({ ...autoMv, end: time }); setSyncError('');
-        } else setSyncError('最後の歌詞の開始後から曲の終わりまでの時刻を指定してください。');
-      }}
-      generate={() => switchVersion()} restore={switchVersion}
-      exportVideo={() => { pause(); setExportOpen(true); }} /> : <>
     <header className="app-header" inert={loadingProject}>
       <div className="brand"><span className="brand-icon"><Icon name="logo" size={22} /></span><h1>MV <em>Easy</em></h1></div>
       <span className="header-divider" />
       <input className="project-name" aria-label="プロジェクト名" value={settings.name} maxLength={120}
         onChange={event => setSettings({ ...settings, name: event.target.value })} />
       <div className="project-actions">
-        <button type="button" onClick={() => changeMode(false)}>自動生成へ</button>
+        <button type="button" ref={autoButton} className="primary auto-toggle" aria-expanded={autoOpen}
+          aria-controls="auto-panel" disabled={!ready || loadingMusic} onClick={() => {
+            if (autoOpen) { closeAuto(); return; }
+            setAddOpen(false);
+            setProjectMenu(false);
+            setAutoOpen(true);
+          }}>自動生成</button>
         <button type="button" onClick={() => saveFile()} disabled={!ready || loadingMusic}>保存</button>
         <button type="button" aria-label="保存の種類" aria-expanded={projectMenu} disabled={!ready || loadingMusic}
           onClick={() => setProjectMenu(!projectMenu)}>▾</button>
@@ -1023,7 +1005,7 @@ function App() {
         </div>}
       </div>
     </header>
-    <div className="workspace" inert={loadingProject}>
+    <div className={`workspace${autoOpen ? ' workspace-auto' : ''}`} inert={loadingProject}>
       <TemplateLibrary kind={layer?.kind} playing={playing} onAdd={addAnimation} onAuto={autoAnimate} fontProvider={fontProvider}
         targetName={layer ? (layer.kind === 'text' ? layer.text || layer.name : layer.name) : undefined}
         onRandom={addRandom} />
@@ -1058,13 +1040,43 @@ function App() {
           <div className="transport-buttons">
             <button type="button" className="icon-button" aria-label="最初へ" onClick={() => seek(0)}><Icon name="first" /></button>
             <button type="button" className="primary play-button" aria-label={playing ? '一時停止' : '再生'}
-              onClick={togglePlayback}>
+              onClick={() => togglePlayback()}>
               <Icon name={playing ? 'pause' : 'play'} size={19} /></button>
             <button type="button" className="icon-button" aria-label="最後へ" onClick={() => seek(playbackEnd)}><Icon name="last" /></button>
           </div>
           <span className="aspect">16:9</span>
         </div>
       </section>
+    {autoOpen ? <AutoPanel mv={autoMv} ready={ready} busy={loadingProject || loadingMusic}
+      musicName={musicClips[0]?.asset.name} hasAudio={!!asset && musicEnd > 0} musicEnd={musicEnd}
+      playing={playing} playhead={playhead}
+      error={syncError || audioError || storageError}
+      importMusic={() => {
+        const missing = !asset && musicClips[0];
+        relinking.current = !!missing;
+        if (missing) setSelectedMusicId(missing.id);
+        picker.current?.click();
+      }}
+      close={closeAuto}
+      play={() => togglePlayback(musicEnd)} seek={seek} mark={markLyric}
+      undo={() => {
+        const undone = autoMv.starts.at(-1);
+        if (undone !== undefined) seek(undone);
+        setAutoMv({ ...autoMv, starts: autoMv.starts.slice(0, -1) });
+        setSyncError('');
+      }}
+      setLyrics={changeLyrics}
+      setStart={(index, time) => {
+        const starts = editStart(autoMv.starts, index, time, Math.min(musicEnd, autoMv.end ?? musicEnd));
+        if (starts === autoMv.starts) setSyncError('前後の歌詞の間に開始時刻を設定してください。');
+        else { setAutoMv({ ...autoMv, starts }); setSyncError(''); }
+      }}
+      setEnd={time => {
+        if (time > (autoMv.starts.at(-1) ?? 0) && time <= musicEnd) {
+          setAutoMv({ ...autoMv, end: time }); setSyncError('');
+        } else setSyncError('最後の歌詞の開始後から曲の終わりまでの時刻を指定してください。');
+      }}
+      generate={() => switchVersion()} restore={switchVersion} /> :
       <aside className="inspector"
         onFocus={event => {
           if (event.target.matches('textarea, input[type="number"], input[type="color"], input[type="range"]')) history.begin();
@@ -1163,7 +1175,7 @@ function App() {
               <span>{layer.color.toUpperCase()}</span></span></label>
           </fieldset>}
         </> : <p>タイムラインかプレビューでレイヤーを選択してください。</p>}
-      </aside>
+      </aside>}
     </div>
     <div className="timeline-divider" role="separator" aria-label="タイムラインの高さ"
       aria-orientation="horizontal" onPointerDown={event => {
@@ -1221,7 +1233,6 @@ function App() {
         else next.add(id);
         return next;
       })} /></div>
-    </>}
   </main>;
 }
 

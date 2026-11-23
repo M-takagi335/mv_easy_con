@@ -1,4 +1,3 @@
-import type { ReactNode } from 'react';
 import type { AutoMv } from './autoMv';
 import { lyricLines } from './autoMv';
 import { usePlayhead } from './playhead';
@@ -7,13 +6,11 @@ import { formatTime } from './Timeline';
 
 type Props = {
   mv: AutoMv; ready: boolean; busy: boolean; musicName?: string; hasAudio: boolean;
-  musicEnd: number; playbackEnd: number; playing: boolean; playhead: Playhead;
-  preview?: ReactNode; error: string;
-  importMusic: () => void; open: () => void; save: () => void; edit: () => void;
+  musicEnd: number; playing: boolean; playhead: Playhead; error: string;
+  importMusic: () => void; close: () => void;
   play: () => void; seek: (time: number) => void; mark: () => void; undo: () => void;
   setLyrics: (text: string) => void; setStart: (index: number, time: number) => void;
   setEnd: (time: number) => void; generate: () => void; restore: (id: string) => void;
-  exportVideo: () => void;
 };
 
 function Transport({ playhead, limit, playing, disabled, play, seek }: {
@@ -43,24 +40,19 @@ function TimeInput({ label, value, max, change }: {
     }} />;
 }
 
-export function AutoWorkspace(props: Props) {
-  const { mv, busy, musicEnd, hasAudio, playing, ready, preview } = props;
+export function AutoPanel(props: Props) {
+  const { mv, busy, musicEnd, hasAudio, playing, ready } = props;
   const lines = lyricLines(mv.lyrics);
   const next = mv.starts.length;
   const end = mv.end ?? musicEnd;
   const canGenerate = ready && !busy && hasAudio && next > 0 && next === lines.length &&
     end <= musicEnd && end > mv.starts[next - 1];
-  return <div className="auto-app" inert={busy}>
-    <header className="auto-header">
-      <h1>MV Easy</h1>
-      <nav aria-label="プロジェクト">
-        <button type="button" onClick={props.open}>開く</button>
-        <button type="button" disabled={!ready} onClick={props.save}>プロジェクトを保存</button>
-        <button type="button" disabled={!ready} onClick={props.edit}>詳細編集</button>
-      </nav>
-    </header>
-    <div className="auto-grid">
-      <section className="auto-card">
+  return <aside className="inspector auto-panel" id="auto-panel" aria-labelledby="auto-panel-title">
+    <div className="panel-title">
+      <h2 id="auto-panel-title">MVを自動生成</h2>
+      <button type="button" autoFocus onClick={props.close}>閉じる</button>
+    </div>
+    <div className="auto-fields" inert={busy}>
         <h2>音楽と歌詞</h2>
         <div className="auto-row">
           <button type="button" disabled={!ready || playing} onClick={props.importMusic}>
@@ -95,23 +87,13 @@ export function AutoWorkspace(props: Props) {
         </div>
         {props.error && <p className="auto-error" role="alert">{props.error}</p>}
         <button type="button" className="primary auto-generate" disabled={!canGenerate}
-          onClick={props.generate}>{mv.active ? 'もう一度生成' : 'MVを自動生成'}</button>
-      </section>
-      <section className="auto-card">
-        <div className="auto-row"><h2>プレビュー</h2>
-          {mv.active && mv.versions.length > 0 && <label className="auto-versions">生成履歴
+          onClick={props.generate}>{mv.active ? '再生成' : '自動生成'}</button>
+          {mv.active && mv.versions.length > 0 && <label className="auto-row">生成履歴
             <select value={mv.active} onChange={event => props.restore(event.target.value)}>
               {mv.versions.map(version => <option key={version.id} value={version.id}>{version.name}</option>)}
             </select>
           </label>}
-        </div>
-        {preview ?? <div className="auto-placeholder">生成したMVがここに表示されます</div>}
-        {preview && <>
-          <Transport playhead={props.playhead} limit={props.playbackEnd} playing={playing}
-            disabled={!ready} play={props.play} seek={props.seek} />
-          <button type="button" className="primary" disabled={!ready} onClick={props.exportVideo}>動画を保存</button>
-        </>}
-      </section>
     </div>
-  </div>;
+    {busy && <p role="status">音声と波形を読み込んでいます…</p>}
+  </aside>;
 }
